@@ -1,31 +1,31 @@
-# FWX Tag-Address Mapper
-
-Script R pour parser les fichiers FWX de WinCC flexible et établir la correspondance entre les tags (VAR) et les adresses DATALINK.
+# FWX Tag-Address Mapper Enhanced
 
 ## 📋 À propos
 
-Ce script est basé sur un travail original trouvé sur GitHub, amélioré avec :
-- Correction des erreurs de parsing
-- Distinction Siemens/Omron
-- Gestion des variables internes
-- Export Excel structuré
+Ce projet est une **version améliorée** du travail original de l'utilisateur GitHub [Nom de l'auteur original] :
+- 🔗 Dépôt original : [Flex-RT-Configuration-Editor](https://github.com/.../Flex-RT-Configuration-Editor)
+- ⭐ Stars originales : 8
+- 🔧 Langages : R (64.7%), HTML (35.3%)
 
-## 🚀 Utilisation
+## 🚀 Améliorations apportées
 
-1. Installer R et les packages : `install.packages(c("bitops", "openxlsx"))`
-2. Modifier le chemin du fichier FWX dans le script
-3. Exécuter le script
-4. Récupérer le fichier Excel généré dans le dossier `SPOT`
+| Amélioration | Description |
+|-------------|-------------|
+| ✅ **Correspondance Tags/Adresses** | Établissement automatique de la liaison |
+| ✅ **Distinction Siemens/Omron** | Détection basée sur les plages d'adresses |
+| ✅ **Variables internes** | Gestion des tags Tag_X sans adresse |
+| ✅ **Export Excel structuré** | Fichier Excel avec multiples feuilles |
+| ✅ **Gestion des erreurs** | Messages d'erreur explicites |
+| ✅ **Documentation** | Commentaires et README détaillé |
 
-## 📦 Fichiers
+## 📦 Nouveautés par rapport à l'original
 
-- `fwx_parser.R` : script principal
-- `types.csv.example` : exemple de fichier de types
+- **Parsing robuste** : Correction des erreurs de colonnes (rbind)
+- **Correspondance intelligente** : Plusieurs méthodes de liaison (index, Data01, ordre)
+- **Classification automatique** : Siemens (DB/M) vs Omron (DM)
+- **Export professionnel** : Fichier Excel avec styles et feuilles multiples
+- **Gestion des cas spéciaux** : Variables internes, tags sans adresse
 
-## 📄 Licence
+## 🙏 Crédits
 
-MIT
-
-## 👤 Auteur
-
-[Abdelaziz Bensalem] - [[votre LinkedIn](https://www.linkedin.com/in/abdelaziz-bensalem-28481a23/)]
+Un grand merci à l'auteur original pour son travail de base qui a rendu ce projet possible.
