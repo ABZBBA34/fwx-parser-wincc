@@ -2,7 +2,7 @@
 
 ## 📋 À propos
 
-Ce projet est une **version améliorée** du travail original de l'utilisateur GitHub [Nom de l'auteur original] :
+Ce projet est une **version améliorée** du travail original de l'utilisateur GitHub [rois286] :
 - 🔗 Dépôt original : [Flex-RT-Configuration-Editor](https://github.com/.../Flex-RT-Configuration-Editor)
 - ⭐ Stars originales : 8
 - 🔧 Langages : R (64.7%), HTML (35.3%)
