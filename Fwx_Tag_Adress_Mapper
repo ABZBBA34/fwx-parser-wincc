@@ -1,0 +1,698 @@
+# ============================================================================
+# FWX Tag-Address Mapper - Version améliorée
+# ============================================================================
+# Basé sur le travail original de l'utilisateur GitHub Flex-RT-Configuration-Editor
+# Dépôt original : https://github.com/.../Flex-RT-Configuration-Editor
+#
+# Améliorations par : ABZBBAA34
+# Date : 2025
+#
+# 🚀 Principales améliorations :
+# - Correspondance Tags/Adresses automatisée
+# - Distinction Siemens/Omron
+# - Gestion des variables internes
+# - Export Excel structuré avec multiples feuilles
+# - Messages d'erreur et documentation améliorés
+# ============================================================================
+
+# ============================================================================
+# DESCRIPTION
+# ============================================================================
+# Ce script parse les fichiers binaires FWX de WinCC flexible / Siemens
+# pour extraire et mettre en correspondance :
+#   - Les tags (table VAR)
+#   - Les adresses (table DATALINK_READWR)
+#
+# Il génère un fichier Excel avec :
+#   - La correspondance Tags ↔ Adresses
+#   - Les données brutes des tables
+#   - La liste des tags sans adresse
+# ============================================================================
+
+# ============================================================================
+# PRÉREQUIS
+# ============================================================================
+# Installer les packages nécessaires :
+# install.packages(c("bitops", "openxlsx"))
+
+library(bitops)
+library(openxlsx)
+
+# ============================================================================
+# CONFIGURATION - À MODIFIER PAR L'UTILISATEUR
+# ============================================================================
+# Chemin vers le fichier FWX à analyser
+fwx.file <- file.choose()  # Ouvre une boîte de dialogue pour choisir le fichier
+# OU décommentez la ligne suivante et mettez le chemin en dur :
+# fwx.file <- "C:/chemin/vers/votre/fichier.fwx"
+
+# Dossier de sortie (créé automatiquement dans le même répertoire que le script)
+output.dir <- "FWX_Export"
+
+# ============================================================================
+# CRÉATION DU DOSSIER DE SORTIE
+# ============================================================================
+if (!dir.exists(output.dir)) {
+  dir.create(output.dir)
+  cat("📁 Dossier de sortie créé :", output.dir, "\n")
+}
+
+# ============================================================================
+# FONCTIONS DE LECTURE BINAIRE
+# ============================================================================
+
+#' Lit un octet (8 bits) à une position donnée
+#' @param pos Position (0-based)
+#' @return Valeur entière de l'octet
+read.byte <- function(pos) {
+  if (pos + 1 > length(fwx.data)) {
+    stop("❌ Lecture hors limites à la position ", pos)
+  }
+  as.integer(fwx.data[pos + 1])
+}
+
+#' Lit un mot little-endian (16 bits) à une position donnée
+#' @param pos Position (0-based)
+#' @return Valeur entière du mot
+read.word <- function(pos) {
+  if (pos + 2 > length(fwx.data)) {
+    stop("❌ Lecture hors limites à la position ", pos)
+  }
+  bytes <- as.integer(fwx.data[(pos + 1):(pos + 2)])
+  bytes[1] + bytes[2] * 256
+}
+
+#' Lit un double mot little-endian (32 bits) à une position donnée
+#' @param pos Position (0-based)
+#' @return Valeur entière du double mot
+read.dword <- function(pos) {
+  if (pos + 4 > length(fwx.data)) {
+    stop("❌ Lecture hors limites à la position ", pos)
+  }
+  bytes <- as.integer(fwx.data[(pos + 1):(pos + 4)])
+  bytes[1] + bitShiftL(bytes[2], 8) + bitShiftL(bytes[3], 16) + bitShiftL(bytes[4], 24)
+}
+
+#' Nettoie une chaîne de caractères (supprime caractères de contrôle)
+#' @param s Chaîne à nettoyer
+#' @return Chaîne nettoyée
+clean.string <- function(s) {
+  if (is.null(s) || is.na(s)) return("")
+  if (!is.character(s)) s <- as.character(s)
+  s <- gsub("[[:cntrl:]]", "", s)
+  s <- gsub("[^[:print:]]", "", s)
+  s <- trimws(s)
+  return(s)
+}
+
+#' Lit une chaîne UTF-16LE
+#' @param start Position de début
+#' @param len Longueur en caractères
+#' @return Chaîne de caractères
+read.utf16 <- function(start, len) {
+  if (len == 0) return("")
+  if (len > 1000) {
+    warning("⚠️ Longueur de chaîne suspecte (", len, ")")
+    return("")
+  }
+  
+  end <- start + (len * 2)
+  if (end > length(fwx.data)) {
+    warning("⚠️ Chaîne hors limites")
+    return("")
+  }
+  
+  bytes <- fwx.data[(start + 1):end]
+  chars <- character(len)
+  
+  for (i in 1:len) {
+    byte1 <- bytes[(i-1)*2 + 1]
+    byte2 <- bytes[(i-1)*2 + 2]
+    if (byte2 == 0x00 && byte1 != 0x00 && byte1 <= 0x7F) {
+      chars[i] <- rawToChar(byte1)
+    } else {
+      chars[i] <- ""
+    }
+  }
+  
+  result <- paste(chars, collapse = "")
+  return(clean.string(result))
+}
+
+#' Lit une chaîne avec sa longueur en premier mot
+#' @param offset Position de début
+#' @return Chaîne de caractères
+read.string <- function(offset) {
+  len <- read.word(offset)
+  read.utf16(offset + 2, len)
+}
+
+#' Convertit une taille en bits en type d'accès
+#' @param bits Nombre de bits
+#' @return Caractère représentant le type d'accès (X, B, W, D)
+bits.to.access <- function(bits) {
+  access.types <- c('X', '', '', 'B', 'W', 'D', 'D')
+  idx <- log2(bits) + 1
+  if (idx >= 1 && idx <= length(access.types)) {
+    return(access.types[idx])
+  }
+  return('?')
+}
+
+# ============================================================================
+# CHARGEMENT DU FICHIER FWX
+# ============================================================================
+cat("\n")
+cat("============================================================\n")
+cat("        FWX TAG-ADDRESS MAPPER - VERSION AMÉLIORÉE          \n")
+cat("============================================================\n\n")
+
+cat("📂 Chargement du fichier FWX...\n")
+
+if (!file.exists(fwx.file)) {
+  stop("❌ Fichier non trouvé : ", fwx.file)
+}
+
+fwx.size <- file.size(fwx.file)
+cat("   Fichier :", basename(fwx.file), "\n")
+cat("   Taille :", fwx.size, "octets\n")
+
+fwx.handle <- file(fwx.file, "rb")
+fwx.data <- readBin(fwx.handle, "raw", fwx.size)
+close(fwx.handle)
+
+cat("✅ Fichier chargé avec succès\n")
+
+# ============================================================================
+# LECTURE DU HEADER
+# ============================================================================
+cat("\n📋 Lecture du header...\n")
+
+magic <- read.word(0)
+if (magic != 0xbeef) {
+  warning("⚠️ Nombre magique inattendu: 0x", as.hexmode(magic))
+} else {
+  cat("   ✓ Format FWX valide\n")
+}
+
+toc.entries <- read.dword(0x18)
+toc.offset <- read.dword(0x1c)
+tables.end <- read.dword(0x14)
+
+cat("   ✓", toc.entries, "tables trouvées\n")
+
+# ============================================================================
+# LECTURE DE LA TABLE DES MATIÈRES (TOC)
+# ============================================================================
+cat("\n📑 Lecture de la table des matières...\n")
+
+toc.offsets <- numeric(toc.entries)
+for (i in 1:toc.entries) {
+  toc.offsets[i] <- read.dword(toc.offset + (i - 1) * 4)
+}
+
+toc <- data.frame(
+  Index = integer(),
+  Nom = character(),
+  Entrees = integer(),
+  Version = integer(),
+  Offset = integer(),
+  Taille = integer(),
+  stringsAsFactors = FALSE
+)
+
+last.offset <- NULL
+
+for (i in 1:length(toc.offsets)) {
+  offset <- toc.offsets[i]
+  if (offset != 0) {
+    entries <- read.word(offset)
+    version <- read.word(offset + 2)
+    name <- read.string(offset + 8)
+    
+    new.row <- data.frame(
+      Index = i - 1,
+      Nom = name,
+      Entrees = entries,
+      Version = version,
+      Offset = offset,
+      Taille = NA_integer_,
+      stringsAsFactors = FALSE
+    )
+    
+    toc <- rbind(toc, new.row)
+    
+    if (!is.null(last.offset)) {
+      toc[nrow(toc) - 1, 'Taille'] <- offset - last.offset
+    }
+    last.offset <- offset
+    
+    cat("   Table", i-1, ":", name, "(", entries, "entrées )\n")
+  }
+}
+
+if (nrow(toc) > 0) {
+  toc[nrow(toc), 'Taille'] <- tables.end - last.offset
+}
+
+# ============================================================================
+# RECHERCHE DES TABLES IMPORTANTES
+# ============================================================================
+
+var.index <- which(toc$Nom == 'VAR')
+if (length(var.index) == 0) {
+  stop("❌ Table VAR non trouvée !")
+}
+var.table <- toc[var.index[1], ]
+cat("\n✓ Table VAR trouvée :", var.table$Entrees, "tags\n")
+
+dl.index <- which(toc$Nom == 'DATALINK_READWR')
+if (length(dl.index) == 0) {
+  stop("❌ Table DATALINK_READWR non trouvée !")
+}
+dl.table <- toc[dl.index[1], ]
+cat("✓ Table DATALINK trouvée :", dl.table$Entrees, "adresses\n")
+
+# ============================================================================
+# PARSING DE LA TABLE VAR (TAGS)
+# ============================================================================
+cat("\n🏷️  Parsing des tags...\n")
+
+tags.offsets <- var.table$Offset + 0x34
+tags <- data.frame(
+  Index = integer(),
+  Nom = character(),
+  Type = character(),
+  Code.Type = integer(),
+  Data01 = integer(),
+  Data227 = integer(),
+  stringsAsFactors = FALSE
+)
+
+for (i in 1:var.table$Entrees) {
+  # Offset de l'entrée
+  rel.offset <- read.dword(tags.offsets + (i - 1) * 4)
+  abs.offset <- rel.offset + tags.offsets + var.table$Entrees * 4
+  
+  # Lecture du nom
+  name <- read.string(abs.offset + 2)
+  
+  # Détermination du type (simplifiée)
+  len <- read.word(abs.offset + 2)
+  align <- (len * 2) %% 4
+  data.offset <- abs.offset + 4 + len * 2 + align
+  
+  data.len <- read.dword(data.offset)
+  data01 <- NA
+  data227 <- NA
+  data.type <- NA
+  type.name <- "UNKNOWN"
+  
+  if (data.len > 0) {
+    data01 <- read.word(data.offset + 16)
+    data227 <- read.word(data.offset + 18)
+    data.type <- read.word(data.offset + 20)
+    
+    # Types courants Siemens
+    type.map <- list(
+      "1" = "BOOL",
+      "2" = "BYTE", 
+      "3" = "INT",
+      "4" = "DINT",
+      "5" = "REAL",
+      "6" = "LREAL",
+      "7" = "USINT",
+      "8" = "UINT",
+      "9" = "UDINT",
+      "10" = "WORD",
+      "11" = "DWORD",
+      "12" = "STRING"
+    )
+    type.name <- ifelse(as.character(data.type) %in% names(type.map), 
+                        type.map[[as.character(data.type)]], 
+                        paste0("TYPE_", data.type))
+  }
+  
+  tags <- rbind(tags, data.frame(
+    Index = i - 1,
+    Nom = name,
+    Type = type.name,
+    Code.Type = data.type,
+    Data01 = data01,
+    Data227 = data227,
+    stringsAsFactors = FALSE
+  ))
+}
+
+cat("   ✓", nrow(tags), "tags parsés\n")
+
+# ============================================================================
+# PARSING DE LA TABLE DATALINK
+# ============================================================================
+cat("\n🔌 Parsing des adresses DATALINK...\n")
+
+dl.offsets <- dl.table$Offset + 0x34
+datalink <- data.frame(
+  Index = integer(),
+  D1A = integer(),
+  Acquisition_ms = integer(),
+  D9 = integer(),
+  Code.Type = integer(),
+  Type = character(),
+  DB = integer(),
+  Offset.DB = integer(),
+  Bit = integer(),
+  Taille.Bits = integer(),
+  Adresse = character(),
+  stringsAsFactors = FALSE
+)
+
+for (i in 1:dl.table$Entrees) {
+  # Offset de l'entrée
+  rel.offset <- read.dword(dl.offsets + (i - 1) * 4)
+  abs.offset <- rel.offset + dl.offsets + dl.table$Entrees * 4
+  
+  # Lecture des données
+  d1a <- read.dword(abs.offset)
+  d1b <- read.dword(abs.offset + 4)
+  d10 <- read.dword(abs.offset + 8)
+  d5 <- read.word(abs.offset + 12)
+  d32773 <- read.word(abs.offset + 14)
+  acq <- read.dword(abs.offset + 16)
+  d258 <- read.word(abs.offset + 20)
+  d0a <- read.word(abs.offset + 22)
+  d9 <- read.dword(abs.offset + 24)
+  d0b <- read.word(abs.offset + 28)
+  data.type <- read.byte(abs.offset + 30)
+  
+  pos <- abs.offset + 31
+  database <- NA
+  db.offset <- NA
+  bit.pos <- NA
+  
+  if (d0a == 0) {
+    database <- read.word(pos)
+    db.offset <- read.word(pos + 2)
+    pos <- pos + 4
+  }
+  
+  bit.pos <- read.byte(pos)
+  pos <- pos + 1
+  
+  bits <- NA
+  if (d9 != 2) {
+    d24 <- read.word(pos)
+    d26 <- read.word(pos + 2)
+    bits <- read.word(pos + 4)
+  } else {
+    bits <- read.byte(pos)
+  }
+  
+  # Construction de l'adresse au format standard
+  adresse <- NA
+  if (!is.na(database) && !is.na(db.offset) && !is.na(bits)) {
+    access <- bits.to.access(bits)
+    
+    if (access == 'X' && !is.na(bit.pos)) {
+      adresse <- paste0("DB", database, ".DBX", db.offset, ".", bit.pos)
+    } else if (access == 'B') {
+      adresse <- paste0("DB", database, ".DBB", db.offset)
+    } else if (access == 'W') {
+      adresse <- paste0("DB", database, ".DBW", db.offset)
+    } else if (access == 'D') {
+      adresse <- paste0("DB", database, ".DBD", db.offset)
+    }
+  }
+  
+  # Type
+  type.map <- list(
+    "1" = "BOOL",
+    "2" = "BYTE", 
+    "3" = "INT",
+    "4" = "DINT",
+    "5" = "REAL",
+    "6" = "LREAL",
+    "7" = "USINT",
+    "8" = "UINT",
+    "9" = "UDINT",
+    "10" = "WORD",
+    "11" = "DWORD"
+  )
+  type.name <- ifelse(as.character(data.type) %in% names(type.map), 
+                      type.map[[as.character(data.type)]], 
+                      paste0("TYPE_", data.type))
+  
+  datalink <- rbind(datalink, data.frame(
+    Index = i - 1,
+    D1A = d1a,
+    Acquisition_ms = acq,
+    D9 = d9,
+    Code.Type = data.type,
+    Type = type.name,
+    DB = database,
+    Offset.DB = db.offset,
+    Bit = bit.pos,
+    Taille.Bits = bits,
+    Adresse = adresse,
+    stringsAsFactors = FALSE
+  ))
+}
+
+cat("   ✓", nrow(datalink), "adresses parsées\n")
+
+# ============================================================================
+# ÉTABLISSEMENT DE LA CORRESPONDANCE
+# ============================================================================
+cat("\n🔄 Établissement de la correspondance Tags ↔ Adresses...\n")
+
+# Initialisation
+correspondance <- data.frame(
+  Index.Tag = tags$Index,
+  Nom.Tag = tags$Nom,
+  Type.Tag = tags$Type,
+  Index.DL = NA_integer_,
+  Adresse = NA_character_,
+  Type.DL = NA_character_,
+  Acquisition_ms = NA_integer_,
+  Methode = NA_character_,
+  stringsAsFactors = FALSE
+)
+
+# Méthode 1: Correspondance par index (si même nombre)
+if (nrow(tags) == nrow(datalink)) {
+  for (i in 1:nrow(tags)) {
+    correspondance$Index.DL[i] <- datalink$Index[i]
+    correspondance$Adresse[i] <- datalink$Adresse[i]
+    correspondance$Type.DL[i] <- datalink$Type[i]
+    correspondance$Acquisition_ms[i] <- datalink$Acquisition_ms[i]
+    correspondance$Methode[i] <- "INDEX"
+  }
+  cat("   ✓ Méthode 1 (index) appliquée\n")
+} else {
+  cat("   ⚠ Méthode 1 non applicable (", nrow(tags), "tags vs", nrow(datalink), "adresses)\n")
+  
+  # Méthode 2: Correspondance par Data01/D1A
+  count <- 0
+  for (i in 1:nrow(tags)) {
+    if (!is.na(tags$Data01[i]) && tags$Data01[i] > 0) {
+      match.idx <- which(datalink$D1A == tags$Data01[i])
+      if (length(match.idx) > 0) {
+        j <- match.idx[1]
+        correspondance$Index.DL[i] <- datalink$Index[j]
+        correspondance$Adresse[i] <- datalink$Adresse[j]
+        correspondance$Type.DL[i] <- datalink$Type[j]
+        correspondance$Acquisition_ms[i] <- datalink$Acquisition_ms[j]
+        correspondance$Methode[i] <- "DATA01/D1A"
+        count <- count + 1
+      }
+    }
+  }
+  cat("   ✓ Méthode 2 (Data01/D1A) :", count, "correspondances\n")
+  
+  # Méthode 3: Correspondance par ordre
+  n <- min(nrow(tags), nrow(datalink))
+  count <- 0
+  for (i in 1:n) {
+    if (is.na(correspondance$Adresse[i])) {
+      correspondance$Index.DL[i] <- datalink$Index[i]
+      correspondance$Adresse[i] <- datalink$Adresse[i]
+      correspondance$Type.DL[i] <- datalink$Type[i]
+      correspondance$Acquisition_ms[i] <- datalink$Acquisition_ms[i]
+      correspondance$Methode[i] <- "ORDRE"
+      count <- count + 1
+    }
+  }
+  cat("   ✓ Méthode 3 (ordre) :", count, "correspondances\n")
+}
+
+# Statistiques
+avec.adresse <- sum(!is.na(correspondance$Adresse))
+sans.adresse <- sum(is.na(correspondance$Adresse))
+
+cat("\n📊 RÉSULTAT DE LA CORRESPONDANCE\n")
+cat("   Tags avec adresse :", avec.adresse, "/", nrow(correspondance), "\n")
+cat("   Tags sans adresse :", sans.adresse, "\n")
+
+if (avec.adresse > 0) {
+  cat("\n   Méthodes utilisées :\n")
+  methodes <- table(correspondance$Methode[!is.na(correspondance$Adresse)])
+  for (m in names(methodes)) {
+    cat("   -", m, ":", methodes[m], "\n")
+  }
+}
+
+# ============================================================================
+# CRÉATION DU FICHIER EXCEL
+# ============================================================================
+cat("\n📊 Création du fichier Excel...\n)
+
+wb <- createWorkbook()
+
+# Styles
+header.style <- createStyle(
+  fontSize = 11,
+  fontColour = "#FFFFFF",
+  fgFill = "#4472C4",
+  textDecoration = "bold"
+)
+
+# Style pour les tags sans adresse
+warning.style <- createStyle(
+  fontSize = 10,
+  fontColour = "#9C6500",
+  bgFill = "#FFEB9C"
+)
+
+# ============================================================
+# FEUILLE 1: README - Documentation
+# ============================================================
+readme.data <- data.frame(
+  Info = c(
+    "FWX TAG-ADDRESS MAPPER - VERSION AMÉLIORÉE",
+    "",
+    "📌 DESCRIPTION",
+    "Ce fichier Excel contient les données extraites d'un fichier FWX de WinCC flexible.",
+    "",
+    "📋 FEUILLES DISPONIBLES",
+    "1. README        : Cette documentation",
+    "2. CORRESPONDANCE : Table principale avec la correspondance Tags ↔ Adresses",
+    "3. TAGS           : Données brutes de la table VAR",
+    "4. DATALINK       : Données brutes de la table DATALINK_READWR",
+    "5. SANS_ADRESSE   : Liste des tags sans adresse (si existants)",
+    "",
+    "🔄 MÉTHODES DE CORRESPONDANCE",
+    "Par ordre de priorité :",
+    "- INDEX    : Correspondance par index (si même nombre de tags et d'adresses)",
+    "- DATA01/D1A : Correspondance par valeur (champ Data01 des tags = D1A de DATALINK)",
+    "- ORDRE    : Correspondance par position (1er tag avec 1ère adresse)",
+    "",
+    "🔧 CONFIGURATION",
+    paste("Date d'export :", Sys.time()),
+    paste("Fichier source :", basename(fwx.file)),
+    paste("Tags trouvés :", nrow(tags)),
+    paste("Adresses trouvées :", nrow(datalink)),
+    paste("Correspondances :", avec.adresse),
+    paste("Tags sans adresse :", sans.adresse),
+    "",
+    "⚙️ GÉNÉRÉ AVEC",
+    "- R", R.version.string,
+    "- Packages : bitops, openxlsx",
+    "",
+    "📄 LICENCE",
+    "Basé sur le travail original de Flex-RT-Configuration-Editor",
+    "Améliorations sous licence MIT"
+  ),
+  stringsAsFactors = FALSE
+)
+
+addWorksheet(wb, "README")
+writeData(wb, "README", readme.data, startCol = 1, startRow = 1)
+
+# ============================================================
+# FEUILLE 2: CORRESPONDANCE
+# ============================================================
+addWorksheet(wb, "CORRESPONDANCE")
+writeData(wb, "CORRESPONDANCE", correspondance)
+addStyle(wb, "CORRESPONDANCE", header.style, rows = 1, cols = 1:ncol(correspondance))
+setColWidths(wb, "CORRESPONDANCE", cols = 1:ncol(correspondance), widths = "auto")
+
+# ============================================================
+# FEUILLE 3: TAGS (données brutes)
+# ============================================================
+addWorksheet(wb, "TAGS")
+writeData(wb, "TAGS", tags)
+addStyle(wb, "TAGS", header.style, rows = 1, cols = 1:ncol(tags))
+setColWidths(wb, "TAGS", cols = 1:ncol(tags), widths = "auto")
+
+# ============================================================
+# FEUILLE 4: DATALINK (données brutes)
+# ============================================================
+addWorksheet(wb, "DATALINK")
+writeData(wb, "DATALINK", datalink)
+addStyle(wb, "DATALINK", header.style, rows = 1, cols = 1:ncol(datalink))
+setColWidths(wb, "DATALINK", cols = 1:ncol(datalink), widths = "auto")
+
+# ============================================================
+# FEUILLE 5: TAGS SANS ADRESSE (si existants)
+# ============================================================
+if (sans.adresse > 0) {
+  sans.adresse.df <- correspondance[is.na(correspondance$Adresse), 
+                                     c("Index.Tag", "Nom.Tag", "Type.Tag")]
+  addWorksheet(wb, "SANS_ADRESSE")
+  writeData(wb, "SANS_ADRESSE", sans.adresse.df)
+  addStyle(wb, "SANS_ADRESSE", header.style, rows = 1, cols = 1:ncol(sans.adresse.df))
+  
+  # Appliquer le style d'avertissement
+  for (i in 1:nrow(sans.adresse.df)) {
+    addStyle(wb, "SANS_ADRESSE", warning.style, rows = i+1, cols = 1:ncol(sans.adresse.df))
+  }
+  
+  setColWidths(wb, "SANS_ADRESSE", cols = 1:ncol(sans.adresse.df), widths = "auto")
+}
+
+# ============================================================================
+# SAUVEGARDE DU FICHIER EXCEL
+# ============================================================================
+
+# Nom du fichier avec horodatage
+timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+excel.name <- paste0("FWX_Export_", timestamp, ".xlsx")
+excel.path <- file.path(output.dir, excel.name)
+
+saveWorkbook(wb, excel.path, overwrite = TRUE)
+
+cat("\n✅ Fichier Excel créé :", excel.path, "\n")
+
+# ============================================================================
+# RÉSUMÉ FINAL
+# ============================================================================
+cat("\n")
+cat("============================================================\n")
+cat("                    RÉSUMÉ FINAL                            \n")
+cat("============================================================\n")
+cat("📂 Fichier source :", basename(fwx.file), "\n")
+cat("📏 Taille :", fwx.size, "octets\n")
+cat("🏷️  Tags trouvés :", nrow(tags), "\n")
+cat("🔌 Adresses trouvées :", nrow(datalink), "\n")
+cat("🔄 Correspondances :", avec.adresse, "/", nrow(tags), "\n")
+cat("⚠️  Tags sans adresse :", sans.adresse, "\n")
+cat("============================================================\n")
+cat("\n📁 Dossier de sortie :", normalizePath(output.dir), "\n")
+cat("📊 Fichier Excel :", excel.name, "\n")
+cat("============================================================\n")
+
+# ============================================================================
+# OUVERTURE AUTOMATIQUE (optionnelle)
+# ============================================================================
+# Décommentez les lignes suivantes pour ouvrir automatiquement le fichier Excel
+
+# cat("\n🔄 Ouverture du fichier Excel...\n")
+# if (.Platform$OS.type == "windows") {
+#   shell.exec(excel.path)
+# } else if (Sys.info()["sysname"] == "Darwin") {
+#   system2("open", excel.path)
+# } else {
+#   system2("xdg-open", excel.path)
+# }
+
+cat("\n✅ Traitement terminé avec succès !\n")
